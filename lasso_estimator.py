@@ -2,6 +2,7 @@ import numpy as np
 from sklearn.linear_model import Lasso
 from sklearn.preprocessing import StandardScaler
 from typing import Optional, Tuple, List
+from config import Config
 
 
 class LassoEstimator:
@@ -91,7 +92,7 @@ class LassoEstimator:
         B: int,
         a_n: float,
         method: str = "cl",  # 'naive', 'wild', 'cl'
-        multipliers: Optional[np.ndarray] = None,
+        multipliers: Optional[np.ndarray] = None
     ) -> Tuple[float, List[float]]:
         """
         Select lambda* via bootstrap MSE. Applies thresholding for modified/wild. Skips for naive.
@@ -114,7 +115,7 @@ class LassoEstimator:
             beta_hat = self._fit_lasso(X, y, lam)
 
             # apply thresholding if needed
-            beta_center = self._threshold(beta_hat, a_n) if method in ["cl", "wild"] else beta_hat
+            beta_center = self._threshold(beta_hat, a_n) if method in ["modified", "wild", "block"] else beta_hat
 
             # compute residuals
             residuals = y - X @ beta_center
@@ -127,11 +128,16 @@ class LassoEstimator:
                 if method == "wild":
                     v = multipliers[b] if multipliers is not None else np.random.choice([-1, 1], size=n)
                     y_star = X @ beta_center + residuals * v
-                elif method in ["naive", "cl"]:
+                elif method in ["naive", "modified"]:
                     e_star = np.random.choice(residuals, size=n, replace=True)
                     y_star = X @ beta_center + e_star
                 elif method == "block":
-                    raise NotImplementedError("Block bootstrap must be handled externally — use BlockBootstrap class.")
+                    block_size = int(np.floor(Config.n ** (1 / 3)))
+                    m = n // block_size
+                    blocks = [residuals[i * block_size:(i + 1) * block_size] for i in range(m)]
+                    sampled = [blocks[i] for i in np.random.choice(m, m, replace=True)]
+                    e_star = np.concatenate(sampled)[:n]
+                    y_star = X @ beta_center + e_star
                 else:
                     raise ValueError(f"Unknown bootstrap method: {method}")
 
