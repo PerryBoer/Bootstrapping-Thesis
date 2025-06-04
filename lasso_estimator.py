@@ -1,7 +1,8 @@
 import numpy as np
 from sklearn.linear_model import Lasso
 from sklearn.preprocessing import StandardScaler
-from typing import Optional, List, Tuple
+from typing import Optional, Tuple, List
+
 
 class LassoEstimator:
     def __init__(
@@ -15,40 +16,40 @@ class LassoEstimator:
         self.random_state = random_state
         self.scaler = None
 
-        # Store results
+        # Tracked outputs
         self.beta_hat = None
         self.beta_tilde = None
         self.active_set = None
         self.residuals = None
         self.predictions = None
-        self.bootstrap_betas = None
         self.support_size = None
         self.perfect_match = None
         self.test_mse = None
 
-    def _fit_core(self, X: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
+    # fit LASSO model and return coefficients based on sklearn's Lasso implementation
+    def _fit_lasso(self, X: np.ndarray, y: np.ndarray, lam: float) -> np.ndarray:
         model = Lasso(alpha=lam, fit_intercept=self.fit_intercept,
                       random_state=self.random_state, max_iter=5000)
         model.fit(X, y)
         return model.coef_
 
-    def _threshold_beta(self, beta: np.ndarray, a_n: float) -> np.ndarray:
+    # thresholding function to apply after LASSO fit --- core functionality
+    def _threshold(self, beta: np.ndarray, a_n: float) -> np.ndarray:
         return beta * (np.abs(beta) > a_n)
 
-    def fit_lasso(
+    # main fitting function that applies LASSO and thresholdinh
+    def fit(
         self,
         X: np.ndarray,
         y: np.ndarray,
         lam: float,
         a_n: float,
+        threshold: bool = True,
         support_true: Optional[np.ndarray] = None,
         X_test: Optional[np.ndarray] = None,
-        y_test: Optional[np.ndarray] = None
-    ) -> np.ndarray:
-        """
-        Fit LASSO and store thresholded estimator, active set, predictions,
-        and optionally test MSE and perfect match indicator.
-        """
+        y_test: Optional[np.ndarray] = None,
+    ):
+        # Standardize the data if set to true
         if self.standardize:
             self.scaler = StandardScaler().fit(X)
             X_scaled = self.scaler.transform(X)
@@ -57,89 +58,91 @@ class LassoEstimator:
         else:
             X_scaled = X
 
-        self.beta_hat = self._fit_core(X_scaled, y, lam)
-        self.beta_tilde = self._threshold_beta(self.beta_hat, a_n)
-        self.active_set = np.flatnonzero(self.beta_hat)
-        self.support_size = len(self.active_set)
+        # fit beta hat
+        self.beta_hat = self._fit_lasso(X_scaled, y, lam)
 
+        # apply thresholding if required -- not needed for naive
+        self.beta_tilde = self._threshold(self.beta_hat, a_n) if threshold else self.beta_hat
+
+        # compute predictions and residuals
         self.predictions = X_scaled @ self.beta_tilde
         self.residuals = y - self.predictions
 
+        # active set and support size
+        self.active_set = np.flatnonzero(self.beta_hat)
+        self.support_size = len(self.active_set)
+
+        # check if perfect match with true support
         if support_true is not None:
             self.perfect_match = set(self.active_set) == set(support_true)
 
+        # if test data is provided, compute test MSE
         if X_test is not None and y_test is not None:
             y_pred = X_test @ self.beta_tilde
             self.test_mse = np.mean((y_test - y_pred) ** 2)
 
         return self.beta_hat
 
-    def get_active_set(self) -> Optional[np.ndarray]:
-        return self.active_set
-
-    def get_thresholded_beta(self) -> Optional[np.ndarray]:
-        return self.beta_tilde
-
-    def get_bootstrap_replicates(self) -> Optional[np.ndarray]:
-        return self.bootstrap_betas
-
-    def get_test_mse(self) -> Optional[float]:
-        return self.test_mse
-
-    def get_support_size(self) -> Optional[int]:
-        return self.support_size
-
-    def is_perfect_match(self) -> Optional[bool]:
-        return self.perfect_match
-
     def select_lambda_bootstrap_mse(
         self,
         X: np.ndarray,
         y: np.ndarray,
         lambdas: np.ndarray,
-        B: int = 100,
-        a_n: float = 0.05,
-        multiplier: str = "rademacher",
-        return_full_path: bool = False
-    ) -> float | Tuple[float, List[float]]:
+        B: int,
+        a_n: float,
+        method: str = "cl",  # 'naive', 'wild', 'cl'
+        multipliers: Optional[np.ndarray] = None,
+    ) -> Tuple[float, List[float]]:
         """
-        Select lambda via bootstrap MSE minimization using residual resampling.
-        Uses method-dependent multiplier logic:
-        - 'rademacher': wild bootstrap (±1)
-        - 'normal': standard residual resampling (i.i.d. errors)
+        Select lambda* via bootstrap MSE. Applies thresholding for modified/wild. Skips for naive.
+        Block bootstrap must be handled externally (different y_star handling due to resampling blocks).
         """
         if self.standardize:
             self.scaler = StandardScaler().fit(X)
             X = self.scaler.transform(X)
 
+        # store the number of samples and features
         n, p = X.shape
-        mse_per_lambda = []
 
+        # placeholder for MSE values
+        mse_list = []
+
+        # go over each lambda value in the grid
         for lam in lambdas:
-            beta_hat = self._fit_core(X, y, lam)
-            beta_tilde = self._threshold_beta(beta_hat, a_n)
-            residuals = y - X @ beta_tilde
 
-            beta_b = np.zeros((B, p))
+            # fit beta for current lambda
+            beta_hat = self._fit_lasso(X, y, lam)
+
+            # apply thresholding if needed
+            beta_center = self._threshold(beta_hat, a_n) if method in ["cl", "wild"] else beta_hat
+
+            # compute residuals
+            residuals = y - X @ beta_center
+
+            # bootstrap placeholder
+            beta_boot = np.zeros((B, p))
+
             for b in range(B):
-                if multiplier == "rademacher":
-                    v = np.random.choice([-1, 1], size=n)
-                    y_star = X @ beta_tilde + residuals * v
-                elif multiplier == "normal":
+                # generate bootstrap responses per method
+                if method == "wild":
+                    v = multipliers[b] if multipliers is not None else np.random.choice([-1, 1], size=n)
+                    y_star = X @ beta_center + residuals * v
+                elif method in ["naive", "cl"]:
                     e_star = np.random.choice(residuals, size=n, replace=True)
-                    y_star = X @ beta_tilde + e_star
+                    y_star = X @ beta_center + e_star
+                elif method == "block":
+                    raise NotImplementedError("Block bootstrap must be handled externally — use BlockBootstrap class.")
                 else:
-                    raise ValueError("Unknown multiplier type")
+                    raise ValueError(f"Unknown bootstrap method: {method}")
 
-                beta_b[b] = self._fit_core(X, y_star, lam)
+                # fit LASSO on bootstrap sample
+                beta_boot[b] = self._fit_lasso(X, y_star, lam)
 
-            mse = np.mean(np.linalg.norm(beta_b - beta_tilde, axis=1) ** 2)
-            mse_per_lambda.append(mse)
+            
+            # calculate the MSE between bootstrap estimates and the centered beta
+            mse = np.mean(np.linalg.norm(beta_boot - beta_center, axis=1) ** 2)
+            mse_list.append(mse)
 
-        best_idx = np.argmin(mse_per_lambda)
-        best_lambda = lambdas[best_idx]
-
-        if return_full_path:
-            return best_lambda, mse_per_lambda
-        return best_lambda
-
+        # return lambda with minimum MSE and the list of MSEs
+        best_idx = np.argmin(mse_list)
+        return lambdas[best_idx], mse_list
