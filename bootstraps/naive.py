@@ -30,9 +30,9 @@ class NaiveBootstrap:
         lower = np.percentile(beta_star, (1 - level) / 2 * 100, axis=0)
         upper = np.percentile(beta_star, (1 + level) / 2 * 100, axis=0)
         return lower, upper
-
+    
+    # return coverage indicator returning 1 if beta_true is within the confidence interval
     def compute_coverage(self, beta_star, level=0.90):
-        # return coverage indicator returning 1 if beta_true is within the confidence interval
         ci_lower, ci_upper = self.compute_ci(beta_star, level)
         coverage = (self.beta_true >= ci_lower) & (self.beta_true <= ci_upper)
         return coverage.astype(int)
