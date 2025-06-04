@@ -1,150 +1,177 @@
 import numpy as np
-from typing import List, Dict
-from lasso_estimator import LassoEstimator
+import pandas as pd
+from typing import Dict, Any, List
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from config import Config
 from dgp import DGP
+from lasso_estimator import LassoEstimator
 from bootstraps.naive import NaiveBootstrap
 from bootstraps.modified import ModifiedBootstrap
 from bootstraps.wild import WildBootstrap
 from bootstraps.block import BlockBootstrap
 
-class Simulation:
+
+class SimulationRunner:
     def __init__(
         self,
-        n: int,
-        p: int,
-        s: int,
-        R: int,
-        B: int,
+        method: str,
+        alpha_th: float,
         signal_type: str,
         error_type: str,
-        lambdas: np.ndarray,
-        a_n: float,
-        block_length: int = None,
-        seed: int = 42
+        lambda_grid: np.ndarray,
+        level: float = 0.90,
+        tracked_indices: List[int] = [5, 20],
     ):
-        self.n = n
-        self.p = p
-        self.s = s
-        self.R = R
-        self.B = B
+        self.method = method
+        self.alpha_th = alpha_th
         self.signal_type = signal_type
         self.error_type = error_type
-        self.lambdas = lambdas
-        self.a_n = a_n
-        self.block_length = block_length
-        self.seed = seed
-        np.random.seed(seed)
+        self.lambda_grid = lambda_grid
+        self.level = level
 
-        self.methods = {
-            'naive': NaiveBootstrap,
-            'modified': ModifiedBootstrap,
-            'wild': WildBootstrap,
-            'block': BlockBootstrap,
-        }
+        self.n = Config.n
+        self.p = Config.p
+        self.s = Config.s
+        self.R = Config.num_mc
+        self.B = Config.num_bootstrap
+        self.tracked_indices = tracked_indices
 
-    def run(self) -> Dict[str, Dict[str, np.ndarray]]:
-        results = {
-            method: {
-                'coverage': [],
-                'ci_length': [],
-                'bias': [],
-                'bias_tilde': [],
-                'variance': [],
-                'mse_var': [],
-                'jaccard': [],
-                'lambda_star': [],
-                'snr': [],
-                'support_size': [],
-                'perfect_match': []
-            } for method in self.methods
-        }
+        # For collecting raw and processed results
+        self.raw_results = []
+        self.summary_records = []
+        self.beta_hat_matrix = {j: [] for j in tracked_indices}
+        self.boot_var_matrix = {j: [] for j in tracked_indices}
 
-        all_beta_hats = {method: [] for method in self.methods}
-        lambda_list = []
+    def jaccard_index(self, set1: set, set2: set) -> float:
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        return intersection / union if union > 0 else 0.0
+
+    def run(self) -> Dict[str, Any]:
         for r in range(self.R):
-            # --- Data Generation ---
-            dgp = DGP(n=self.n, p=self.p, s=self.s, signal_type=self.signal_type,
-                      error_type=self.error_type, seed=self.seed + r)
+            np.random.seed(Config.seed + r)
+            dgp = DGP(signal_type=self.signal_type, error_type=self.error_type, seed=Config.seed + r)
             data = dgp.generate()
-            X, y = data["X"], data["y"]
-            beta_true, eps, support_true, snr = data["beta"], data["errors"], data["support"], data["snr"]
 
-            for method_name, method_cls in self.methods.items():
-                # --- Method-specific multiplier ---
-                multiplier = 'rademacher' if method_name == 'wild' else 'normal'
+            X, y, beta, support, snr = data["X"], data["y"], data["beta"], data["support"], data["snr"]
+            a_n = Config.get_threshold(self.alpha_th)
 
-                # --- Lambda selection via bootstrap-MSE (method-specific) ---
-                estimator = LassoEstimator()
-                lambda_star = estimator.select_lambda_bootstrap_mse(
-                    X, y, self.lambdas, B=50, a_n=self.a_n, multiplier=multiplier
-                )
+            estimator = LassoEstimator()
+            lam_star, _ = estimator.select_lambda_bootstrap_mse(
+                X=X,
+                y=y,
+                lambdas=self.lambda_grid,
+                B=self.B,
+                a_n=a_n,
+                method=self.method,
+            )
 
-                # --- Fit LASSO with method-specific λ* ---
-                estimator.fit_lasso(X, y, lambda_star, a_n=self.a_n, support_true=support_true)
-                beta_hat = estimator.beta_hat
-                beta_tilde = estimator.get_thresholded_beta()
-                active_set = estimator.get_active_set()
+            estimator.fit(
+                X=X,
+                y=y,
+                lam=lam_star,
+                a_n=a_n,
+                threshold=(self.method != "naive"),
+                support_true=support
+            )
 
-                all_beta_hats[method_name].append(beta_hat)
+            beta_hat = estimator.beta_hat.copy()
+            beta_tilde = estimator.beta_tilde.copy()
+            residuals = estimator.residuals.copy()
 
-                # --- Shared support diagnostics ---
-                support_true_set = set(support_true)
-                active_set_set = set(active_set)
-                intersection = len(support_true_set & active_set_set)
-                union = len(support_true_set | active_set_set)
-                jaccard_index = intersection / union if union > 0 else 0
-                support_size = len(active_set)
-                perfect_match = int(support_true_set == active_set_set)
+            # Bootstrap method selection
+            if self.method == "naive":
+                bootstrap = NaiveBootstrap(X, y, beta_hat, beta, fit_intercept=False)
+            elif self.method == "modified":
+                bootstrap = ModifiedBootstrap(X, y, beta_hat, beta, a_n)
+            elif self.method == "wild":
+                bootstrap = WildBootstrap(X, y, beta_hat, beta, a_n)
+            elif self.method == "block":
+                bootstrap = BlockBootstrap(X, y, beta_hat, beta, a_n)
+            else:
+                raise ValueError(f"Unknown method: {self.method}")
 
-                # --- Determine center of bootstrap ---
-                beta_center = beta_hat if method_name == "naive" else beta_tilde
+            boot_results = bootstrap.generate_bootstrap_distribution(B=self.B, lam=lam_star, level=self.level)
 
-                if method_name == 'block':
-                    bootstrapper = method_cls(
-                        X, y, beta_center, a_n=self.a_n,
-                        block_length=self.block_length,
-                        seed=self.seed + r,
-                        true_beta=beta_true
-                    )
-                else:
-                    bootstrapper = method_cls(
-                        X, y, beta_center, a_n=self.a_n,
-                        seed=self.seed + r,
-                        true_beta=beta_true
-                    )
+            for j in self.tracked_indices:
+                self.beta_hat_matrix[j].append(beta_hat[j])
+                self.boot_var_matrix[j].append(np.var(boot_results["beta_star"][:, j]))
 
-                # --- Run bootstrap inference ---
-                out = bootstrapper.generate_bootstrap_distribution(B=self.B, lam=lambda_star)
-                beta_star = out['beta_star']
-                ci_len = out['ci_upper'] - out['ci_lower']
-                bias_true = out['mean'] - beta_true
-                bias_tilde = out['mean'] - beta_tilde
-                variance = out['std'] ** 2
-                coverage = out['coverage']
+            # Store raw result
+            self.raw_results.append({
+                "rep": r,
+                "method": self.method,
+                "alpha_th": self.alpha_th,
+                "lambda_star": lam_star,
+                "snr": snr,
+                "beta_true": beta.copy(),
+                "beta_hat": beta_hat,
+                "beta_tilde": beta_tilde,
+                "support": support.copy(),
+                "residuals": residuals,
+                "beta_star": boot_results["beta_star"],
+                "ci_lower": boot_results["ci_lower"],
+                "ci_upper": boot_results["ci_upper"],
+                "ci_length": boot_results["ci_length"],
+                "coverage": boot_results["coverage"],
+                "var_boot": np.var(boot_results["beta_star"], axis=0),
+                "support_size": estimator.support_size,
+                "perfect_match": estimator.perfect_match,
+                "estimated_support": list(estimator.active_set)
+            })
 
-                # --- Store metrics ---
-                results[method_name]['lambda_star'].append(lambda_star)
-                results[method_name]['coverage'].append(coverage)
-                results[method_name]['ci_length'].append(ci_len)
-                results[method_name]['bias'].append(bias_true)
-                results[method_name]['bias_tilde'].append(bias_tilde)
-                results[method_name]['variance'].append(variance)
-                results[method_name]['jaccard'].append(jaccard_index)
-                results[method_name]['snr'].append(snr)
-                results[method_name]['support_size'].append(support_size)
-                results[method_name]['perfect_match'].append(perfect_match)
+        # Summary computation
+        for result in self.raw_results:
+            support_indices = result["support"]
+            est_support_set = set(result["estimated_support"])
+            true_support_set = set(result["support"])
+            jaccard = self.jaccard_index(est_support_set, true_support_set)
 
-        # --- Compute method-specific empirical MSE(Var) ---
-        for method in self.methods:
-            all_beta = np.array(all_beta_hats[method])
-            empirical_var = np.var(all_beta, axis=0)
-            method_variances = np.array(results[method]['variance'])  # shape (R, p)
-            mse_var = np.mean((method_variances - empirical_var) ** 2)
-            results[method]['mse_var'] = mse_var
+            bias_hat = result["beta_hat"] - result["beta_true"]
+            bias_tilde = result["beta_tilde"] - result["beta_true"]
+            mse_boot_var = (result["var_boot"] - np.var(result["beta_star"], axis=0)) ** 2
 
-            # Convert lists to arrays
-            for key in results[method]:
-                if key != 'mse_var':
-                    results[method][key] = np.array(results[method][key])
+            self.summary_records.append({
+                "rep": result["rep"],
+                "method": result["method"],
+                "alpha_th": result["alpha_th"],
+                "lambda_star": result["lambda_star"],
+                "snr": result["snr"],
+                "mean_coverage": np.mean(result["coverage"][support_indices]),
+                "mean_ci_length": np.mean(result["ci_length"][support_indices]),
+                "bias_hat": np.mean(bias_hat[support_indices]),
+                "bias_tilde": np.mean(bias_tilde[support_indices]),
+                "var_boot_mean": np.mean(result["var_boot"][support_indices]),
+                "mse_var_boot": np.mean(mse_boot_var[support_indices]),
+                "support_size": result["support_size"],
+                "perfect_match": result["perfect_match"],
+                "jaccard": jaccard
+            })
 
-        return results
+        # Pointwise variance fidelity
+        pointwise_var_records = []
+        for j in self.tracked_indices:
+            beta_hat_j = np.array(self.beta_hat_matrix[j])
+            boot_var_j = np.array(self.boot_var_matrix[j])
+            var_mc = np.var(beta_hat_j)
+            var_boot = np.mean(boot_var_j)
+            mse_var_boot = np.mean((boot_var_j - var_mc) ** 2)
+            pointwise_var_records.append({
+                "beta_index": j,
+                "mc_variance": var_mc,
+                "boot_variance_mean": var_boot,
+                "mse_boot_variance": mse_var_boot,
+                "method": self.method,
+                "alpha_th": self.alpha_th,
+            })
+
+        df_summary = pd.DataFrame(self.summary_records)
+        df_raw = pd.DataFrame(self.raw_results)
+        df_pointwise_var = pd.DataFrame(pointwise_var_records)
+
+        return {
+            "summary_df": df_summary,
+            "raw_df": df_raw,
+            "pointwise_variance_df": df_pointwise_var
+        }
