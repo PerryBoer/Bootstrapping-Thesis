@@ -16,7 +16,7 @@ class LassoEstimator:
         self.random_state = random_state
         self.scaler = None
 
-        # Tracked outputs
+        # outputs
         self.beta_hat = None
         self.beta_tilde = None
         self.active_set = None
