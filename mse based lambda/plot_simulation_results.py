@@ -88,9 +88,50 @@ class SimulationPlotter:
             plt.savefig(os.path.join(self.save_dir, "jaccard_distribution.png"))
             plt.close()
 
+    def plot_lambda_mse_paths(self):
+        plt.figure(figsize=(8, 5))
+
+        lambda_paths = []
+        lambda_star_values = []
+        lambda_grid = None
+
+        for _, row in self.raw_df.iterrows():
+            lam_path = row.get("lambda_path")
+            lam_star = row.get("lambda_star")
+            lam_grid = row.get("lambda_grid")
+
+            if lam_path is not None:
+                lambda_paths.append(lam_path)
+                lambda_star_values.append(lam_star)
+                if lambda_grid is None and lam_grid is not None:
+                    lambda_grid = lam_grid
+
+        if lambda_grid is None or not lambda_paths:
+            print("⚠️ No lambda paths to plot.")
+            return
+
+        # Plot each MSE path
+        for path in lambda_paths:
+            plt.plot(lambda_grid, path, linestyle="--", alpha=0.5)
+
+        # Plot mean lambda_star across reps
+        mean_lambda_star = np.mean(lambda_star_values)
+        plt.axvline(x=mean_lambda_star, color='blue', linestyle='--', linewidth=2, label=f"Mean λ* = {mean_lambda_star:.5f}")
+
+        plt.xlabel("Lambda")
+        plt.ylabel("Bootstrap MSE")
+        plt.title("Bootstrap MSE vs Lambda across Reps")
+        plt.legend()
+        plt.grid(True, which="both", linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, "lambda_mse_paths.png"))
+        plt.close()
+
+
     def generate_all_plots(self, beta_indices=[5, 20]):
-        self.plot_lambda_distribution()
-        self.plot_ci_length_distribution()
-        self.plot_bootstrap_distributions(beta_indices=beta_indices)
-        self.plot_support_size_distribution()
-        self.plot_jaccard_distribution()
+        # self.plot_lambda_distribution()
+        # self.plot_ci_length_distribution()
+        # self.plot_bootstrap_distributions(beta_indices=beta_indices)
+        # self.plot_support_size_distribution()
+        # self.plot_jaccard_distribution()
+        self.plot_lambda_mse_paths()
