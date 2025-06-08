@@ -1,34 +1,35 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 from config import Config
 from dgp import DGP
-from lasso_estimator import LassoEstimator
+from LassoEstimatorTheory import LassoEstimatorTheory
 from bootstraps.naive import NaiveBootstrap
 from bootstraps.modified import ModifiedBootstrap
 from bootstraps.wild import WildBootstrap
 from bootstraps.block import BlockBootstrap
+from SimulationPlotter import SimulationPlotter
 
 
 class SimulationRunner:
     def __init__(
         self,
         method: str,
-        alpha_th: float,
+        lambda_val: float,
+        threshold_val: float,
         signal_type: str,
         error_type: str,
-        lambda_grid: np.ndarray,
         level: float = 0.90,
         tracked_indices: List[int] = [5, 20],
+        subdir: str = "results/plots"
     ):
         self.method = method
-        self.alpha_th = alpha_th
+        self.lambda_val = lambda_val
+        self.threshold_val = threshold_val
         self.signal_type = signal_type
         self.error_type = error_type
-        self.lambda_grid = lambda_grid
         self.level = level
+        self.subdir = subdir
 
         self.n = Config.n
         self.p = Config.p
@@ -37,7 +38,6 @@ class SimulationRunner:
         self.B = Config.num_bootstrap
         self.tracked_indices = tracked_indices
 
-        # For collecting raw and processed results
         self.raw_results = []
         self.summary_records = []
         self.beta_hat_matrix = {j: [] for j in tracked_indices}
@@ -55,24 +55,14 @@ class SimulationRunner:
             data = dgp.generate()
 
             X, y, beta, support, snr = data["X"], data["y"], data["beta"], data["support"], data["snr"]
-            a_n = Config.get_threshold(self.alpha_th)
 
-            estimator = LassoEstimator()
-            lam_star, _ = estimator.select_lambda_bootstrap_mse(
-                X=X,
-                y=y,
-                lambdas=self.lambda_grid,
-                B=self.B,
-                a_n=a_n,
-                method=self.method,
-            )
-
+            estimator = LassoEstimatorTheory()
             estimator.fit(
                 X=X,
                 y=y,
-                lam=lam_star,
-                a_n=a_n,
-                threshold=(self.method != "naive"),
+                lam=self.lambda_val,
+                thresholding_level=self.threshold_val,
+                apply_threshold=(self.method != "naive"),
                 support_true=support
             )
 
@@ -80,30 +70,28 @@ class SimulationRunner:
             beta_tilde = estimator.beta_tilde.copy()
             residuals = estimator.residuals.copy()
 
-            # Bootstrap method selection
             if self.method == "naive":
                 bootstrap = NaiveBootstrap(X, y, beta_hat, beta, fit_intercept=False)
             elif self.method == "modified":
-                bootstrap = ModifiedBootstrap(X, y, beta_hat, beta, a_n)
+                bootstrap = ModifiedBootstrap(X, y, beta_hat, beta, self.threshold_val)
             elif self.method == "wild":
-                bootstrap = WildBootstrap(X, y, beta_hat, beta, a_n)
+                bootstrap = WildBootstrap(X, y, beta_hat, beta, self.threshold_val)
             elif self.method == "block":
-                bootstrap = BlockBootstrap(X, y, beta_hat, beta, a_n)
+                bootstrap = BlockBootstrap(X, y, beta_hat, beta, self.threshold_val)
             else:
-                raise ValueError(f"Unknown method: {self.method}")
+                raise ValueError(f"Unknown bootstrap method: {self.method}")
 
-            boot_results = bootstrap.generate_bootstrap_distribution(B=self.B, lam=lam_star, level=self.level)
+            boot_results = bootstrap.generate_bootstrap_distribution(B=self.B, lam=self.lambda_val, level=self.level)
 
             for j in self.tracked_indices:
                 self.beta_hat_matrix[j].append(beta_hat[j])
                 self.boot_var_matrix[j].append(np.var(boot_results["beta_star"][:, j]))
 
-            # Store raw result
             self.raw_results.append({
                 "rep": r,
                 "method": self.method,
-                "alpha_th": self.alpha_th,
-                "lambda_star": lam_star,
+                "lambda_val": self.lambda_val,
+                "threshold_val": self.threshold_val,
                 "snr": snr,
                 "beta_true": beta.copy(),
                 "beta_hat": beta_hat,
@@ -115,18 +103,25 @@ class SimulationRunner:
                 "ci_upper": boot_results["ci_upper"],
                 "ci_length": boot_results["ci_length"],
                 "coverage": boot_results["coverage"],
-                "var_boot": np.var(boot_results["beta_star"], axis=0),
+                "var_boot": boot_results["var"],
                 "support_size": estimator.support_size,
                 "perfect_match": estimator.perfect_match,
                 "estimated_support": list(estimator.active_set)
             })
 
-        # Summary computation
         for result in self.raw_results:
-            support_indices = result["support"]
-            est_support_set = set(result["estimated_support"])
-            true_support_set = set(result["support"])
-            jaccard = self.jaccard_index(est_support_set, true_support_set)
+            true_support = set(result["support"])
+            est_support = set(result["estimated_support"])
+
+            TP = len(true_support & est_support)
+            FP = len(est_support - true_support)
+            FN = len(true_support - est_support)
+
+            precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+            recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+            fdr = FP / (TP + FP) if (TP + FP) > 0 else 0.0
+            fnr = FN / (TP + FN) if (TP + FN) > 0 else 0.0
+            jaccard = self.jaccard_index(est_support, true_support)
 
             bias_hat = result["beta_hat"] - result["beta_true"]
             bias_tilde = result["beta_tilde"] - result["beta_true"]
@@ -135,21 +130,24 @@ class SimulationRunner:
             self.summary_records.append({
                 "rep": result["rep"],
                 "method": result["method"],
-                "alpha_th": result["alpha_th"],
-                "lambda_star": result["lambda_star"],
+                "lambda_val": result["lambda_val"],
+                "threshold_val": result["threshold_val"],
                 "snr": result["snr"],
-                "mean_coverage": np.mean(result["coverage"][support_indices]),
-                "mean_ci_length": np.mean(result["ci_length"][support_indices]),
-                "bias_hat": np.mean(bias_hat[support_indices]),
-                "bias_tilde": np.mean(bias_tilde[support_indices]),
-                "var_boot_mean": np.mean(result["var_boot"][support_indices]),
-                "mse_var_boot": np.mean(mse_boot_var[support_indices]),
+                "mean_coverage": np.mean(result["coverage"][result["support"]]),
+                "mean_ci_length": np.mean(result["ci_length"][result["support"]]),
+                "bias_hat": np.mean(bias_hat[result["support"]]),
+                "bias_tilde": np.mean(bias_tilde[result["support"]]),
+                "var_boot_mean": np.mean(result["var_boot"][result["support"]]),
+                "mse_var_boot": np.mean(mse_boot_var[result["support"]]),
                 "support_size": result["support_size"],
                 "perfect_match": result["perfect_match"],
-                "jaccard": jaccard
+                "jaccard": jaccard,
+                "fdr": fdr,
+                "fnr": fnr,
+                "precision": precision,
+                "recall": recall
             })
 
-        # Pointwise variance fidelity
         pointwise_var_records = []
         for j in self.tracked_indices:
             beta_hat_j = np.array(self.beta_hat_matrix[j])
@@ -163,12 +161,16 @@ class SimulationRunner:
                 "boot_variance_mean": var_boot,
                 "mse_boot_variance": mse_var_boot,
                 "method": self.method,
-                "alpha_th": self.alpha_th,
+                "lambda_val": self.lambda_val,
+                "threshold_val": self.threshold_val
             })
 
         df_summary = pd.DataFrame(self.summary_records)
         df_raw = pd.DataFrame(self.raw_results)
         df_pointwise_var = pd.DataFrame(pointwise_var_records)
+
+        plotter = SimulationPlotter(raw_df=df_raw, summary_df=df_summary, save_dir=self.subdir)
+        plotter.generate_all_plots(beta_indices=self.tracked_indices)
 
         return {
             "summary_df": df_summary,
