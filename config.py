@@ -13,7 +13,7 @@ class Config:
 
     # Simulation controls
     num_bootstrap = 500
-    num_mc = 100
+    num_mc = 1000
     seed = 42
 
     # Confidence interval level
@@ -52,7 +52,7 @@ class Config:
 
     # Supported methods
     error_types = ["gaussian", "heteroskedastic", "ar1"]
-    bootstrap_methods = ["naive", "cl", "wild", "block"]
+    bootstrap_methods = ["naive", "modified", "wild", "block"]
 
     @staticmethod
     def set_random_seed(seed=None):

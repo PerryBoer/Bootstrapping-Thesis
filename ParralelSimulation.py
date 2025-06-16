@@ -1,55 +1,75 @@
-from joblib import Parallel, delayed
-import numpy as np
 import os
+import numpy as np
+from joblib import Parallel, delayed
 from config import Config
-from simulation import SimulationRunner
-from SimulationTables import generate_summary_tables
+from dgp import DGP
+from MonteCarloRunner import MonteCarloRunner
+from LassoEstimatorTheory import LassoEstimatorTheory
+import pandas as pd
 
 
-def run_single_configuration(method, lam, alpha_th, signal_type, error_type, tracked_indices, base_dir="results"):
-    threshold_val = alpha_th * np.sqrt(np.log(Config.p) / Config.n)
-    subdir = os.path.join(base_dir, error_type, signal_type, method)
-    os.makedirs(subdir, exist_ok=True)
+def compute_lambda_alpha_grid(signal_type, error_type):
+    dgp = DGP(signal_type=signal_type, error_type=error_type, seed=Config.seed)
+    data = dgp.generate()
+    X, y, beta_true, support_true, snr = data["X"], data["y"], data["beta"], data["support"], data["snr"]
 
-    runner = SimulationRunner(
+    estimator = LassoEstimatorTheory()
+    rough_lambda = 0.5 * np.sqrt(np.log(Config.p) / Config.n)
+    estimator.fit(X, y, lam=rough_lambda, thresholding_level=0.0, apply_threshold=False, support_true=support_true)
+    beta_hat = estimator.beta_hat.copy()
+    residuals = estimator.residuals
+    sigma_hat = np.std(residuals)
+
+    lambda_base = sigma_hat * np.sqrt(np.log(Config.p) / Config.n)
+    lambda_grid = np.round(np.array([0.5, 1.0, 2.0]) * lambda_base, 5)
+
+    null_indices = list(set(range(Config.p)) - set(support_true))
+    null_magnitudes = np.abs(beta_hat[null_indices])
+    threshold_95 = np.quantile(null_magnitudes, 0.95)
+    alpha_null = threshold_95 / np.sqrt(np.log(Config.p) / Config.n)
+    alpha_grid = [round(alpha_null * factor, 3) for factor in [0.5, 1.0, 2.0]]
+
+    return {
+        "lambda_base": lambda_base,
+        "lambda_grid": lambda_grid.tolist(),
+        "alpha_null": round(alpha_null, 3),
+        "alpha_grid": alpha_grid,
+        "sigma_hat": sigma_hat,
+        "snr": snr
+    }
+
+
+def run_mc_for_config(method, lam, alpha, signal, error, tracked_indices, base_dir="results"):
+    runner = MonteCarloRunner(
         method=method,
         lambda_val=lam,
-        threshold_val=threshold_val,
-        signal_type=signal_type,
-        error_type=error_type,
-        subdir=subdir,
-        tracked_indices=tracked_indices
+        threshold_val=alpha,
+        signal_type=signal,
+        error_type=error,
+        tracked_indices=tracked_indices,
+        R=Config.num_mc
     )
     results = runner.run()
 
-    # Safe filenames
-    suffix = f"lambda{lam:.4f}_alpha{alpha_th:.3f}"
-    results["summary_df"].to_csv(os.path.join(subdir, f"summary_{suffix}.csv"), index=False)
-    results["raw_df"].to_csv(os.path.join(subdir, f"raw_{suffix}.csv"), index=False)
-    results["pointwise_variance_df"].to_csv(os.path.join(subdir, f"pointwise_variance_{suffix}.csv"), index=False)
+    subdir = os.path.join(base_dir, error, signal, method)
+    os.makedirs(subdir, exist_ok=True)
+    suffix = f"lambda{lam:.4f}_alpha{alpha:.3f}"
 
-    tables = generate_summary_tables(results["summary_df"], results["pointwise_variance_df"])
-    for name, df in tables.items():
-        df.to_csv(os.path.join(subdir, f"{name}_table_{suffix}.csv"))
+    pd.DataFrame([results["summary"]]).to_csv(os.path.join(subdir, f"summary_{suffix}.csv"), index=False)
 
-    return f"Finished: {method} | λ={lam} | α={alpha_th} | signal={signal_type} | error={error_type}"
+    for j, tracked in results["tracked"].items():
+        df = pd.DataFrame(tracked)
+        df.to_csv(os.path.join(subdir, f"tracked_j{j}_{suffix}.csv"), index=False)
+
+    raw_df = pd.DataFrame(results["raw_runs"])
+    raw_df.to_csv(os.path.join(subdir, f"raw_runs_{suffix}.csv"), index=False)
+
+    return f"Finished: {method} | λ={lam} | α={alpha} | signal={signal} | error={error}"
 
 
 class ParallelSimulationGrid:
-    def __init__(
-        self,
-        methods,
-        lambda_grid,
-        alpha_grid,
-        signal_types,
-        error_types,
-        tracked_indices=[5, 20],
-        base_results_dir="results",
-        n_jobs=4
-    ):
+    def __init__(self, methods, signal_types, error_types, tracked_indices=[5, 22], base_results_dir="results", n_jobs=4):
         self.methods = methods
-        self.lambda_grid = lambda_grid
-        self.alpha_grid = alpha_grid
         self.signal_types = signal_types
         self.error_types = error_types
         self.tracked_indices = tracked_indices
@@ -57,15 +77,19 @@ class ParallelSimulationGrid:
         self.n_jobs = n_jobs
 
     def run(self):
-        joblist = [
-            (m, lam, alpha, sig, err, self.tracked_indices, self.base_results_dir)
-            for m in self.methods
-            for lam in self.lambda_grid
-            for alpha in self.alpha_grid
-            for sig in self.signal_types
-            for err in self.error_types
-        ]
+        configurations = {(s, e): compute_lambda_alpha_grid(s, e)
+                          for s in self.signal_types for e in self.error_types}
+
+        joblist = []
+        for (sig, err), cfg in configurations.items():
+            for lam in cfg["lambda_grid"]:
+                for alpha in cfg["alpha_grid"]:
+                    for method in self.methods:
+                        print(f"Preparing job: {method} | λ={lam} | α={alpha} | signal={sig} | error={err}")
+                        joblist.append((method, lam, alpha, sig, err, self.tracked_indices, self.base_results_dir))
+
         results = Parallel(n_jobs=self.n_jobs)(
-            delayed(run_single_configuration)(*args) for args in joblist
+            delayed(run_mc_for_config)(*args) for args in joblist
         )
         return results
+

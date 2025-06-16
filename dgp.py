@@ -48,7 +48,9 @@ class DGP:
 
         elif self.error_type == "ar1":
             eps = np.zeros(self.n)
-            phi = 0.5
+            phi = 0.9  # Stronger serial dependence
+            sigma_u = np.sqrt(1 - phi**2)  # Ensures Var(eps_t) = 1 in stationarity
+            u = np.random.normal(0, sigma_u, self.n)  # Innovation noise
             eps[0] = u[0]
             for t in range(1, self.n):
                 eps[t] = phi * eps[t - 1] + u[t]
