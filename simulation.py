@@ -199,10 +199,11 @@ class SingleSimulationRun:
         threshold_val: float,
         signal_type: str,
         error_type: str,
-        level: float = 0.95,
-        tracked_indices: List[int] = [5, 20],
-        seed: int = Config.seed,
+        config: Config,
+        level: float = 0.90,
+        tracked_indices: List[int] = [1, 2],
     ):
+        self.config = config
         self.method = method
         self.lambda_val = lambda_val
         self.threshold_val = threshold_val
@@ -210,22 +211,23 @@ class SingleSimulationRun:
         self.error_type = error_type
         self.level = level
         self.tracked_indices = tracked_indices
-        self.seed = seed
+        self.seed = config.seed
 
-        self.n = Config.n
-        self.p = Config.p
-        self.s = Config.s
-        self.B = Config.num_bootstrap
+        self.n = config.n
+        self.p = config.p
+        self.s = config.s
+        self.B = config.num_bootstrap
 
     def run(self) -> Dict[str, Any]:
-        np.random.seed(self.seed)
-        # print seed
-        print(f"Running simulation with seed: {self.seed}")
-
-        dgp = DGP(signal_type=self.signal_type, error_type=self.error_type, seed=self.seed)
+        # 1) generate a fresh dataset
+        dgp = DGP(config=self.config,
+                  signal_type=self.signal_type,
+                  error_type=self.error_type)
         data = dgp.generate()
-        X, y, beta_true, support_true, snr = data["X"], data["y"], data["beta"], data["support"], data["snr"]
+        X, y = data["X"], data["y"]
+        beta_true, support_true, snr = data["beta"], data["support"], data["snr"]
 
+        # 2) fit initial Lasso
         estimator = LassoEstimatorTheory()
         estimator.fit(
             X=X,
@@ -235,12 +237,12 @@ class SingleSimulationRun:
             apply_threshold=(self.method != "naive"),
             support_true=support_true
         )
-
         beta_hat = estimator.beta_hat.copy()
         beta_tilde = estimator.beta_tilde.copy()
         residuals = estimator.residuals.copy()
         support_est = list(estimator.active_set)
 
+        # 3) pick and run the bootstrap
         if self.method == "naive":
             bootstrap = NaiveBootstrap(X, y, beta_hat, beta_true, fit_intercept=False)
         elif self.method == "modified":
@@ -252,18 +254,36 @@ class SingleSimulationRun:
         else:
             raise ValueError(f"Unknown bootstrap method: {self.method}")
 
-        boot_results = bootstrap.generate_bootstrap_distribution(B=self.B, lam=self.lambda_val, level=self.level)
+        boot_results = bootstrap.generate_bootstrap_distribution(
+            B=self.B, lam=self.lambda_val, level=self.level
+        )
 
         beta_star = boot_results["beta_star"]
         ci_lower = boot_results["ci_lower"]
         ci_upper = boot_results["ci_upper"]
         ci_length = boot_results["ci_length"]
+
+        # Boolean coverage vector
         coverage = (ci_lower <= beta_true) & (beta_true <= ci_upper)
 
+        # New: unconditional coverage metrics
+        true_support = np.array(support_true, dtype=int)
+        null_indices = np.setdiff1d(np.arange(self.p), true_support)
+        coverage_support     = coverage[true_support].mean() if len(true_support) > 0 else np.nan
+        coverage_null        = coverage[null_indices].mean() if len(null_indices) > 0 else np.nan
+        coverage_overall     = coverage.mean()
+
+        # Bootstrap support stability
+        inclusion_counts = np.sum(beta_star != 0, axis=0)
+        inclusion_rate = inclusion_counts / self.B
+        stable_support_mask = inclusion_rate >= 0.9
+        stable_indices = true_support[stable_support_mask[true_support]]
+
+        # Other diagnostics
         bias_hat = beta_hat - beta_true
         bias_tilde = beta_tilde - beta_true
         abs_bias_hat = np.abs(bias_hat)
-        boot_mean = np.mean(beta_star, axis=0)
+        boot_mean = beta_star.mean(axis=0)
         boot_bias = boot_mean - beta_tilde
         boot_var = np.var(beta_star, axis=0)
 
@@ -273,33 +293,27 @@ class SingleSimulationRun:
         FP = len(support_est_set - support_true_set)
         FN = len(support_true_set - support_est_set)
 
-        precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
-        recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-        fdr = FP / (TP + FP) if (TP + FP) > 0 else 0.0
+        precision = TP / (TP + FP) if TP + FP > 0 else 0.0
+        recall = TP / (TP + FN) if TP + FN > 0 else 0.0
+        fdr = FP / (TP + FP) if TP + FP > 0 else 0.0
         jaccard = jaccard_index(support_est_set, support_true_set)
 
-        ci_width_support = ci_length[support_true]
-        coverage_support = coverage[support_true]
-        abs_bias_support = abs_bias_hat[support_true]
-        avg_ci_width_support = np.mean(ci_width_support)
-        mean_abs_bias_support = np.mean(abs_bias_support)
-        coverage_rate_support = np.mean(coverage_support)
+        # Metrics on stable support
+        ci_width_support = ci_length[stable_indices]
+        coverage_support_cond = coverage[stable_indices] if len(stable_indices) > 0 else np.array([])
+        abs_bias_support = abs_bias_hat[stable_indices] if len(stable_indices) > 0 else np.array([])
+        avg_ci_width_support = ci_width_support.mean() if ci_width_support.size > 0 else np.nan
+        mean_abs_bias_support = abs_bias_support.mean() if abs_bias_support.size > 0 else np.nan
+        coverage_rate_support = coverage_support_cond.mean() if coverage_support_cond.size > 0 else np.nan
 
-        # Tail asymmetry
+        # Tail asymmetry and quantiles
         tail_asymmetry = (ci_upper - boot_mean) - (boot_mean - ci_lower)
-
-        # Quantiles
         ci_quantiles = {
             "q_025": np.quantile(beta_star, 0.025, axis=0),
             "q_975": np.quantile(beta_star, 0.975, axis=0),
             "q_05": np.quantile(beta_star, 0.05, axis=0),
             "q_95": np.quantile(beta_star, 0.95, axis=0),
         }
-
-        # Null coverage
-        null_indices = list(set(range(self.p)) - support_true_set)
-        null_coverage = np.mean((ci_lower[null_indices] <= beta_true[null_indices]) &
-                                (beta_true[null_indices] <= ci_upper[null_indices]))
 
         return {
             "X": X, "y": y,
@@ -312,6 +326,9 @@ class SingleSimulationRun:
             "ci_upper": ci_upper,
             "ci_length": ci_length,
             "coverage": coverage,
+            "coverage_support": coverage_support,
+            "coverage_null": coverage_null,
+            "coverage_overall": coverage_overall,
             "support_true": support_true,
             "support_est": support_est,
             "support_size": len(support_est),
@@ -331,10 +348,12 @@ class SingleSimulationRun:
             "jaccard": jaccard,
             "avg_ci_width_support": avg_ci_width_support,
             "mean_abs_bias_support": mean_abs_bias_support,
-            "coverage_rate_support": coverage_rate_support,
-            "null_coverage_rate": null_coverage,
+            "coverage_rate_support_cond": coverage_rate_support,
+            "coverage_rate_support": coverage_support,
+            "null_coverage_rate": coverage_null,
             "tail_asymmetry": tail_asymmetry,
-            "ci_quantiles": ci_quantiles
+            "ci_quantiles": ci_quantiles,
+            "stable_inclusion_rate": inclusion_rate,
+            "stable_indices": stable_indices.tolist()
         }
-
-
+    

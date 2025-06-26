@@ -1,5 +1,5 @@
 from GenerateSimulations import GenerateSimulations
-from ParralelSimulation import ParallelSimulationGrid
+from ParralelSimulation import ParallelDimensionalitySweep
 
 
 # grid_runner = GenerateSimulations(
@@ -12,13 +12,23 @@ from ParralelSimulation import ParallelSimulationGrid
 # grid_runner.run_all()
 
 
-grid = ParallelSimulationGrid(
-    methods=["naive", "modified", "wild", "block"],
-    lambda_grid=[0.01, 0.025, 0.05, 0.1],
-    alpha_grid=[0.125, 0.25, 0.75],
-    signal_types=["strong", "weak", "nearzero"],
-    error_types=["gaussian", "heteroskedastic", "ar1"],
-    n_jobs=4  # use 4 or tune based on Task Manager load
-)
+# grid = ParallelSimulationGrid(
+#     methods=["naive", "modified", "wild", "block"],
+#     lambda_grid=[0.01, 0.025, 0.05, 0.1],
+#     alpha_grid=[0.125, 0.25, 0.75],
+#     signal_types=["strong", "weak", "nearzero"],
+#     error_types=["gaussian", "heteroskedastic", "ar1"],
+#     n_jobs=4  # use 4 or tune based on Task Manager load
+# )
 
-results = grid.run()
+# results = grid.run()
+
+
+if __name__ == "__main__":
+    p_grid = [10, 25, 50, 100, 150, 200, 300, 400]
+    methods = ["naive", "modified", "wild", "block"]
+
+    runner = ParallelDimensionalitySweep(methods=methods, p_grid=p_grid, n_jobs=4)
+    result_messages = runner.run()
+    for msg in result_messages:
+        print(msg)
