@@ -2,11 +2,11 @@
 
 A compact setup to:
 
-DGP.py: Generate synthetic data (Config holds hyperparameters)
+DGP.py: Class to generate data (Config class holds hyperparameters)
 
-Simulation.py: Run one trial and return metrics
+Simulation.py: Run one simulation and return metrics
 
-Bootstrap/: Contains each specific Bootstrap Class.
+Bootstrap/: Contains each specific Bootstrap Class
 
 MonteCarloRunner.py: Run simulations and aggregate results
 
