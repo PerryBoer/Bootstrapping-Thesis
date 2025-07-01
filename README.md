@@ -1,9 +1,17 @@
-The code is structured as follows.
+## Monte Carlo Simulation Framework
 
-First, all bootstrapped methods are modularized in classes, which makes debugging and data/code control easier. 
+A compact setup to:
 
-The data-generating process class is found under DGP.py which contains the DGP Class, which uses the Config class which contains the hyperparameters for sample size, sparsity, signal strenght.
+DGP.py: Generate synthetic data (Config holds hyperparameters)
 
-Simulation.py contains the code for running a simulation, whereas the montecarlorunner.py uses this to aggregate the results. Lastly, the notebooks are used for visualisation and tables.
+Simulation.py: Run one trial and return metrics
 
-All Monte Carlo runs are run in parrallel. 
+Bootstrap/: Contains each specific Bootstrap Class.
+
+MonteCarloRunner.py: Run simulations and aggregate results
+
+Parrallelsimulation: Execture simulations in parrallel, compute grid values, and create jobs
+
+notebooks: visualization and tables
+
+Questions? Feel free to reach out to me on: p.t.boer@student.vu.nl
