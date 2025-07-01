@@ -248,7 +248,7 @@ class SingleSimulationRun:
         elif self.method == "modified":
             bootstrap = ModifiedBootstrap(X, y, beta_hat, beta_true, self.threshold_val)
         elif self.method == "wild":
-            bootstrap = WildBootstrap(X, y, beta_hat, beta_true, self.threshold_val)
+            bootstrap = WildBootstrap(X, y, beta_hat, beta_true, self.threshold_val, lam=self.lambda_val, weight="normal")
         elif self.method == "block":
             bootstrap = BlockBootstrap(X, y, beta_hat, beta_true, self.threshold_val)
         else:

@@ -2,7 +2,6 @@ import numpy as np
 from typing import Literal
 from config import Config
 
-
 class DGP:
     def __init__(
         self,
@@ -14,6 +13,7 @@ class DGP:
         self.n = config.n
         self.p = config.p
         self.s = config.s
+        self.support = config.support
         self.signal_type = signal_type
         self.error_type = error_type
 
@@ -21,25 +21,13 @@ class DGP:
         return np.random.normal(0, 1, size=(self.n, self.p))
 
     def generate_beta(self):
-        # fixed support: first s indices
-        support = np.arange(self.s)
         beta = np.zeros(self.p)
-
-        # get base signal values
         if self.signal_type == "nearzero":
-            base_values = self.config.signal_vectors["nearzero"](self.n)
+            values = self.config.signal_vectors["nearzero"](self.n)
         else:
-            base_values = self.config.signal_vectors[self.signal_type]
-
-        # if s exceeds base_values length, sample extra with replacement
-        if self.s <= len(base_values):
-            values = base_values[: self.s]
-        else:
-            extra = np.random.choice(base_values, size=self.s - len(base_values), replace=True)
-            values = np.concatenate([base_values, extra])
-
-        beta[support] = values
-        return beta, support
+            values = self.config.signal_vectors[self.signal_type]
+        beta[self.support] = values[: self.s]
+        return beta
 
     def generate_errors(self, X):
         u = np.random.normal(0, 1, self.n)
@@ -64,7 +52,7 @@ class DGP:
     def generate(self) -> dict:
         X = self.generate_X()
         X = (X - X.mean(axis=0)) / X.std(axis=0, ddof=0)
-        beta, support = self.generate_beta()
+        beta = self.generate_beta()
         eps = self.generate_errors(X)
         y = X @ beta + eps
         y = y - np.mean(y)
@@ -73,7 +61,7 @@ class DGP:
             "X": X,
             "y": y,
             "beta": beta,
-            "support": support,
             "errors": eps,
+            "support": self.support,
             "snr": snr,
         }

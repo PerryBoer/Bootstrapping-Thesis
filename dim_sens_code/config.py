@@ -3,13 +3,14 @@ import numpy as np
 class Config:
     """
     Dimensionality-aware configuration for the simulation study.
-    Determines sparsity level s based on user input.
+    Determines s and support based on p. Excludes λ/α placeholder machinery.
     """
-    def __init__(self, p, n=250, s=10, seed=42):
+
+    def __init__(self, p, n=250, seed=42):
         self.p = p
         self.n = n
-        self.s = s  # user-specified sparsity level
-        # we'll use DGP.generate_beta to set support
+        self.s = 5 if p < 25 else 10
+        self.support = list(range(self.s))  # Always first s indices
         self.seed = seed
 
         # Simulation settings
